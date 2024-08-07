@@ -1,3 +1,4 @@
+import functools
 import io
 import sqlite3
 
@@ -26,8 +27,8 @@ class ItemDatabase:
             rows = c.fetchall()[:n_items]
             return [row[0] for row in rows]
 
+    @functools.lru_cache(maxsize=2**14)
     def get_item(self, item_id):
-
         with self._connect() as conn:
             c = conn.cursor()
             c.row_factory = sqlite3.Row

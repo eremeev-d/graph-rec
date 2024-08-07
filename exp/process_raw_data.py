@@ -80,37 +80,46 @@ def process_raw_data_goodreads(input_directory, save_directory, positive_rating_
     ratings.to_csv(os.path.join(save_directory, "ratings.csv"), index=False)
 
 
-def create_train_val_split(ratings_path, train_savepath, val_savepath, seed=42):
+def create_train_val_test_split(ratings_path, train_savepath, val_savepath, test_savepath, seed=42):
     ratings = pd.read_csv(ratings_path)
     user_ids = ratings["user_id"].unique()
 
     rng = np.random.default_rng(seed=seed)
-    train_size = int(len(user_ids) * 0.9)
-    train_indices = rng.choice(user_ids, size=train_size, replace=False)
+    train_size = int(len(user_ids) * 0.7)
+    val_size = int(len(user_ids) * 0.15)
+
+    indices = rng.permutation(user_ids)
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:train_size+val_size]
+    test_indices = indices[train_size+val_size:]
 
     train_data = ratings.loc[ratings["user_id"].isin(train_indices)]
-    val_data = ratings.loc[~ratings["user_id"].isin(train_indices)]
+    val_data = ratings.loc[ratings["user_id"].isin(val_indices)]
+    test_data = ratings.loc[ratings["user_id"].isin(test_indices)]
 
     print(f"Train size: {len(train_data)}.")
     print(f"Validation size: {len(val_data)}.")
+    print(f"Test size: {len(test_data)}.")
 
     train_data.to_csv(train_savepath, index=False)
     val_data.to_csv(val_savepath, index=False)
+    test_data.to_csv(test_savepath, index=False)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process raw data.")
     parser.add_argument("--input_directory", required=True, type=str, help="Directory containing the raw data.")
     parser.add_argument("--save_directory", required=True, type=str, help="Directory where processed data will be saved.")
-    parser.add_argument("--create_train_val_split", action="store_true", help="Flag to indicate whether to create a train-validation split.")
+    parser.add_argument("--create_train_val_test_split", action="store_true", help="Flag to indicate whether to create a train-validation split.")
     args = parser.parse_args()
 
     print("Processing raw data...")
     process_raw_data_goodreads(args.input_directory, args.save_directory)
-    if args.create_train_val_split:
-        create_train_val_split(
+    if args.create_train_val_test_split:
+        create_train_val_test_split(
             os.path.join(args.save_directory, "ratings.csv"),
             os.path.join(args.save_directory, "train_ratings.csv"),
-            os.path.join(args.save_directory, "val_ratings.csv")
+            os.path.join(args.save_directory, "val_ratings.csv"),
+            os.path.join(args.save_directory, "test_ratings.csv")
         )
     print("The raw data has been successfully processed.")

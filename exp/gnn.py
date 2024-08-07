@@ -1,5 +1,6 @@
 import argparse
 import os
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -8,7 +9,9 @@ import torch
 import wandb
 from tqdm.auto import tqdm
 
-from utils import prepare_graphs, normalize_embeddings, LRSchedule
+from exp.utils import prepare_graphs, normalize_embeddings, LRSchedule
+from exp.prepare_recsys import prepare_recsys
+from exp.evaluate import evaluate_recsys
 
 
 class GNNLayer(torch.nn.Module):
@@ -41,7 +44,6 @@ class GNNModel(torch.nn.Module):
             self,
             bipartite_graph,
             text_embeddings,
-            deepwalk_embeddings,
             num_layers,
             hidden_dim,
             aggregator_type,
@@ -56,14 +58,12 @@ class GNNModel(torch.nn.Module):
 
         self._bipartite_graph = bipartite_graph
         self._text_embeddings = text_embeddings
-        self._deepwalk_embeddings = deepwalk_embeddings
 
         self._sampler = dgl.sampling.PinSAGESampler(
             bipartite_graph, "Item", "User", num_traversals, 
             termination_prob, num_random_walks, num_neighbor)
 
         self._text_encoder = torch.nn.Linear(text_embeddings.shape[-1], hidden_dim)
-        self._deepwalk_encoder = torch.nn.Linear(deepwalk_embeddings.shape[-1], hidden_dim)
 
         self._layers = torch.nn.ModuleList()
         for _ in range(num_layers):
@@ -92,13 +92,10 @@ class GNNModel(torch.nn.Module):
         sampled_subgraph = self._sample_subraph(ids)
         sampled_subgraph = dgl.compact_graphs(sampled_subgraph, always_preserve=ids)
 
-        ### Encode text & DeepWalk embeddings
+        ### Encode text embeddings
         text_embeddings = self._text_embeddings[
             sampled_subgraph.ndata[dgl.NID]]
-        deepwalk_embeddings = self._deepwalk_embeddings[
-            sampled_subgraph.ndata[dgl.NID]]
-        features = self._text_encoder(text_embeddings) \
-            + self._deepwalk_encoder(deepwalk_embeddings)
+        features = self._text_encoder(text_embeddings)
 
         ### GNN goes brr...
         for layer in self._layers:
@@ -142,12 +139,27 @@ def sample_item_batch(user_batch, bipartite_graph):
     return item_batch
 
 
+@torch.no_grad()
+def inference_model(model, bipartite_graph, batch_size, hidden_dim, device):
+    model.eval()
+    item_embeddings = torch.zeros(bipartite_graph.num_nodes("Item"), hidden_dim).to(device)
+    for items_batch in tqdm(torch.utils.data.DataLoader(
+            torch.arange(bipartite_graph.num_nodes("Item")), 
+            batch_size=batch_size, 
+            shuffle=True
+    )):
+        item_embeddings[items_batch] = model(items_batch.to(device))
+
+    item_embeddings = normalize_embeddings(item_embeddings.cpu().numpy())
+    return item_embeddings
+
+
 def prepare_gnn_embeddings(
         # Paths
         items_path,
-        ratings_path,
+        train_ratings_path,
+        val_ratings_path,
         text_embeddings_path,
-        deepwalk_embeddings_path,
         embeddings_savepath, 
         # Learning hyperparameters
         temperature,
@@ -165,12 +177,13 @@ def prepare_gnn_embeddings(
         num_random_walks, 
         num_neighbor,
         # Misc
+        validate_every_n_epoch,
         device, 
         wandb_name, 
         use_wandb,
 ):
     ### Prepare graph
-    bipartite_graph, _ = prepare_graphs(items_path, ratings_path)
+    bipartite_graph, _ = prepare_graphs(items_path, train_ratings_path)
     bipartite_graph = bipartite_graph.to(device)
 
     ### Init wandb
@@ -179,11 +192,9 @@ def prepare_gnn_embeddings(
 
     ### Prepare model
     text_embeddings = torch.tensor(np.load(text_embeddings_path)).to(device)
-    deepwalk_embeddings = torch.tensor(np.load(deepwalk_embeddings_path)).to(device)
     model = GNNModel(
         bipartite_graph=bipartite_graph, 
         text_embeddings=text_embeddings, 
-        deepwalk_embeddings=deepwalk_embeddings,
         num_layers=num_layers,
         hidden_dim=hidden_dim,
         aggregator_type=aggregator_type,
@@ -214,6 +225,7 @@ def prepare_gnn_embeddings(
     ### Train loop
     model.train()
     for epoch in range(num_epochs):
+        ### Train
         for user_batch in tqdm(dataloader):
             item_batch = sample_item_batch(user_batch, bipartite_graph)  # (2, |user_batch|)
             item_batch = item_batch.reshape(-1)  # (2 * |user_batch|)
@@ -226,24 +238,29 @@ def prepare_gnn_embeddings(
             loss.backward()
             optimizer.step()
             lr_scheduler.step()
+        ### Validation
+        if (validate_every_n_epoch is not None) and (((epoch + 1) % validate_every_n_epoch) == 0):
+            item_embeddings = inference_model(
+                model, bipartite_graph, batch_size, hidden_dim, device)
+            with tempfile.TemporaryDirectory() as tmp_dir_name:
+                tmp_embeddings_path = os.path.join(tmp_dir_name, "embeddings.npy")
+                np.save(tmp_embeddings_path, item_embeddings)
+                prepare_recsys(items_path, tmp_embeddings_path, tmp_dir_name)
+                metrics = evaluate_recsys(
+                    val_ratings_path, 
+                    os.path.join(tmp_dir_name, "index.faiss"),
+                    os.path.join(tmp_dir_name, "items.db"))
+                print(f"Epoch {epoch + 1} / {num_epochs}. {metrics}")
+                if use_wandb:
+                    wandb.log(metrics)
+            
+        
          
     if use_wandb:
         wandb.finish()
     
     ### Process full dataset
-    model.eval()
-    with torch.no_grad():
-        hidden_dim = text_embeddings.shape[-1]
-        item_embeddings = torch.zeros(bipartite_graph.num_nodes("Item"), hidden_dim).to(device)
-        for items_batch in tqdm(torch.utils.data.DataLoader(
-                torch.arange(bipartite_graph.num_nodes("Item")), 
-                batch_size=batch_size, 
-                shuffle=True
-        )):
-            item_embeddings[items_batch] = model(items_batch.to(device))
-
-    ### Extract & save item embeddings
-    item_embeddings = normalize_embeddings(item_embeddings.cpu().numpy())
+    item_embeddings = inference_model(model, bipartite_graph, batch_size, hidden_dim, device)
     np.save(embeddings_savepath, item_embeddings)
 
 
@@ -252,9 +269,9 @@ if __name__ == "__main__":
 
     # Paths
     parser.add_argument("--items_path", type=str, required=True, help="Path to the items file")
-    parser.add_argument("--ratings_path", type=str, required=True, help="Path to the ratings file")
+    parser.add_argument("--train_ratings_path", type=str, required=True, help="Path to the train ratings file")
+    parser.add_argument("--val_ratings_path", type=str, required=True, help="Path to the validation ratings file")
     parser.add_argument("--text_embeddings_path", type=str, required=True, help="Path to the text embeddings file")
-    parser.add_argument("--deepwalk_embeddings_path", type=str, required=True, help="Path to the deepwalk embeddings file")
     parser.add_argument("--embeddings_savepath", type=str, required=True, help="Path to the file where gnn embeddings will be saved")
 
     # Learning hyperparameters
@@ -265,7 +282,7 @@ if __name__ == "__main__":
 
     # Model hyperparameters
     parser.add_argument("--num_layers", type=int, default=2, help="Number of layers in the model")
-    parser.add_argument("--hidden_dim", type=int, default=384, help="Hidden dimension size")
+    parser.add_argument("--hidden_dim", type=int, default=64, help="Hidden dimension size")
     parser.add_argument("--aggregator_type", type=str, default="mean", help="Type of aggregator in SAGEConv")
     parser.add_argument("--no_skip_connection", action="store_false", dest="skip_connection", help="Disable skip connections")
     parser.add_argument("--no_bidirectional", action="store_false", dest="bidirectional", help="Do not use reversed edges in convolution")
@@ -275,6 +292,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_neighbor", type=int, default=3, help="Number of neighbors in PinSAGE-like sampler")
 
     # Misc
+    parser.add_argument("--validate_every_n_epoch", type=int, default=2, help="Perform RecSys validation every n train epochs.")
     parser.add_argument("--device", type=str, default="cpu", help="Device to run the model on (cpu or cuda)")
     parser.add_argument("--wandb_name", type=str, help="WandB run name")
     parser.add_argument("--no_wandb", action="store_false", dest="use_wandb", help="Disable WandB logging")

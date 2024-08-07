@@ -19,6 +19,7 @@ def prepare_sbert_embeddings(
     items = pd.read_csv(items_path).sort_values("item_id")
     sentences = items["description"].values
     model = SentenceTransformer(model_name).to(device)
+    model.eval()
     embeddings = []
     for start_index in tqdm(range(0, len(sentences), batch_size)):
         batch = sentences[start_index:start_index+batch_size]

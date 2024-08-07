@@ -1,5 +1,6 @@
 import argparse
 import json
+from tqdm.auto import tqdm
 
 import pandas as pd
 import numpy as np
@@ -9,16 +10,26 @@ from app.recommendations import RecommenderSystem
 
 def precision_at_k(recommended_items, relevant_items, k):
     recommended_at_k = set(recommended_items[:k])
-    relevant_set = set(relevant_items)
-    return len(recommended_at_k & relevant_set) / k
+    return len(recommended_at_k & relevant_items) / k
+
+
+def average_precision_at_k(recommended_items, relevant_items, k):
+    relevant_items = set(relevant_items)
+
+    apk_sum = 0.0
+    for m, item in enumerate(recommended_items):
+        if item in relevant_items:
+            apk_sum += precision_at_k(recommended_items, relevant_items, m+1)
+    
+    return apk_sum / min(k, len(relevant_items))
 
 
 def evaluate_recsys(
-    metrics_savepath,
     val_ratings_path, 
     faiss_index_path, 
     db_path,
-    n_recommend_items,
+    n_recommend_items=10,
+    metrics_savepath=None
 ):
     recsys = RecommenderSystem(
         faiss_index_path=faiss_index_path, 
@@ -30,16 +41,14 @@ def evaluate_recsys(
 
 
     metric_arrays = {
-        "precision@1": [],
-        "precision@3": [],
-        "precision@10": []
+        "ap@5": [],
     }
 
-    for item_group in grouped_items:
+    for item_group in tqdm(grouped_items):
         if len(item_group) == 1:
             continue
 
-        ### Precision@k is computed for each edge.
+        ### Metrics are computed for each edge.
         ### We will first aggregate it over all edges for user
         ### And after that - aggregate over all users
         user_metric_arrays = dict()
@@ -50,12 +59,8 @@ def evaluate_recsys(
             recommend_items = list(recsys.recommend_items(item, n_recommend_items))
             relevant_items = set(item_group) - {item}
 
-            user_metric_arrays["precision@1"].append(
-                precision_at_k(recommend_items, relevant_items, k=1))
-            user_metric_arrays["precision@3"].append(
-                precision_at_k(recommend_items, relevant_items, k=3))
-            user_metric_arrays["precision@10"].append(
-                precision_at_k(recommend_items, relevant_items, k=10))
+            user_metric_arrays["ap@5"].append(
+                average_precision_at_k(recommend_items, relevant_items, k=5))
 
         for metric in metric_arrays.keys():
             user_metric = np.mean(user_metric_arrays[metric])
@@ -65,9 +70,11 @@ def evaluate_recsys(
     for metric, array in metric_arrays.items():
         metrics[metric] = np.mean(array)
 
-    with open(metrics_savepath, "w") as f:
-        json.dump(metrics, f)
-    print(f"Saved metrics to {metrics_savepath}")
+    if metrics_savepath is not None:
+        with open(metrics_savepath, "w") as f:
+            json.dump(metrics, f)
+        print(f"Saved metrics to {metrics_savepath}")
+    return metrics
 
 
 if __name__ == "__main__":
