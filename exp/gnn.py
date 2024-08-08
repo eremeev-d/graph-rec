@@ -20,19 +20,22 @@ class GNNLayer(torch.nn.Module):
         self._skip_connection = skip_connection
         self._bidirectional = bidirectional
 
-        self._norm = torch.nn.LayerNorm(hidden_dim)
         self._conv = dgl.nn.SAGEConv(hidden_dim, hidden_dim, aggregator_type)
         self._activation = torch.nn.ReLU()
 
         if bidirectional:
-            self._norm_rev = torch.nn.LayerNorm(hidden_dim)
             self._conv_rev = dgl.nn.SAGEConv(hidden_dim, hidden_dim, aggregator_type)
             self._activation_rev = torch.nn.ReLU()
 
     def forward(self, graph, x):
-        y = self._activation(self._conv(graph, self._norm(x)))
+        edge_weights = graph.edata["weights"]
+
+        y = self._activation(self._conv(graph, x, edge_weights))
         if self._bidirectional:
-            y = y + self._activation_rev(self._conv_rev(dgl.reverse(graph), self._norm_rev(x)))
+            reversed_graph = dgl.reverse(graph, copy_edata=True)
+            edge_weights = reversed_graph.edata["weights"]
+            y = y + self._activation_rev(self._conv_rev(reversed_graph, x, edge_weights))
+
         if self._skip_connection:
             return x + y
         else:
@@ -76,15 +79,22 @@ class GNNModel(torch.nn.Module):
 
         subgraph = dgl.graph(([], []), num_nodes=self._bipartite_graph.num_nodes("Item")).to(device)
         prev_ids = set()
+        weights = []
 
         for _ in range(num_layers):
             frontier_ids = torch.tensor(frontier_ids, dtype=torch.int64).to(device)
-            new_edges = self._sampler(frontier_ids).edges()
+            new_sample = self._sampler(frontier_ids)
+            new_weights = new_sample.edata["weights"]
+            new_edges = new_sample.edges()
+
             subgraph.add_edges(*new_edges)
+            weights.append(new_weights)
+
             prev_ids |= set(frontier_ids.cpu().tolist())
             frontier_ids = set(dgl.compact_graphs(subgraph).ndata[dgl.NID].cpu().tolist())
             frontier_ids = list(frontier_ids - prev_ids)
             
+        subgraph.edata["weights"] = torch.cat(weights, dim=0).to(torch.float32)
         return subgraph
 
     def forward(self, ids):
@@ -215,12 +225,7 @@ def prepare_gnn_embeddings(
 
     ### Prepare optimizer & LR scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    total_steps = num_epochs * len(dataloader)
-    lr_schedule = LRSchedule(
-        total_steps=total_steps,
-        warmup_steps=int(0.1*total_steps),
-        final_factor=0.1)  # TODO: move to args
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_schedule)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     
     ### Train loop
     model.train()
@@ -284,15 +289,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers", type=int, default=2, help="Number of layers in the model")
     parser.add_argument("--hidden_dim", type=int, default=64, help="Hidden dimension size")
     parser.add_argument("--aggregator_type", type=str, default="mean", help="Type of aggregator in SAGEConv")
-    parser.add_argument("--no_skip_connection", action="store_false", dest="skip_connection", help="Disable skip connections")
+    parser.add_argument("--skip_connection", action="store_true", dest="skip_connection", help="Disable skip connections")
     parser.add_argument("--no_bidirectional", action="store_false", dest="bidirectional", help="Do not use reversed edges in convolution")
     parser.add_argument("--num_traversals", type=int, default=4, help="Number of traversals in PinSAGE-like sampler")
     parser.add_argument("--termination_prob", type=float, default=0.5, help="Termination probability in PinSAGE-like sampler")
     parser.add_argument("--num_random_walks", type=int, default=200, help="Number of random walks in PinSAGE-like sampler")
-    parser.add_argument("--num_neighbor", type=int, default=3, help="Number of neighbors in PinSAGE-like sampler")
+    parser.add_argument("--num_neighbor", type=int, default=10, help="Number of neighbors in PinSAGE-like sampler")
 
     # Misc
-    parser.add_argument("--validate_every_n_epoch", type=int, default=2, help="Perform RecSys validation every n train epochs.")
+    parser.add_argument("--validate_every_n_epoch", type=int, default=4, help="Perform RecSys validation every n train epochs.")
     parser.add_argument("--device", type=str, default="cpu", help="Device to run the model on (cpu or cuda)")
     parser.add_argument("--wandb_name", type=str, help="WandB run name")
     parser.add_argument("--no_wandb", action="store_false", dest="use_wandb", help="Disable WandB logging")
