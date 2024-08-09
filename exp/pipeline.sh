@@ -17,7 +17,7 @@ PYTHONPATH=. python exp/sbert.py \
     --embeddings_savepath "$save_directory/text_embeddings.npy" \
     --device $device
 
-PYTHONPATH=. python exp/gnn.py \
+PYTHONPATH=. python exp/gnn/train.py \
     --items_path "$save_directory/items.csv" \
     --train_ratings_path "$save_directory/train_ratings.csv" \
     --val_ratings_path "$save_directory/val_ratings.csv" \
