@@ -94,6 +94,9 @@ def prepare_gnn_embeddings(config):
     item_embeddings = inference_model(model, bipartite_graph, config["batch_size"], config["hidden_dim"], config["device"])
     np.save(config["embeddings_savepath"], item_embeddings)
 
+    ### Save final model
+    torch.save(model.to("cpu").state_dict(), config["model_savepath"])
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare GNN Embeddings")
@@ -104,6 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_ratings_path", type=str, required=True, help="Path to the validation ratings file")
     parser.add_argument("--text_embeddings_path", type=str, required=True, help="Path to the text embeddings file")
     parser.add_argument("--embeddings_savepath", type=str, required=True, help="Path to the file where gnn embeddings will be saved")
+    parser.add_argument("--model_savepath", type=str, required=True, help="Path to save final model checkpoint.")
 
     # Learning hyperparameters
     parser.add_argument("--temperature", type=float, default=0.1, help="Temperature for NT-Xent loss")

@@ -23,6 +23,7 @@ PYTHONPATH=. python exp/gnn/train.py \
     --val_ratings_path "$save_directory/val_ratings.csv" \
     --text_embeddings_path "$save_directory/text_embeddings.npy" \
     --embeddings_savepath "$save_directory/embeddings.npy"\
+    --model_savepath "$save_directory/model.pt" \
     --device $device \
     --no_wandb
 
