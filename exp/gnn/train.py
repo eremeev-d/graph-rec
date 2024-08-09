@@ -19,71 +19,44 @@ from exp.gnn.utils import (
     sample_item_batch, inference_model)
 
 
-def prepare_gnn_embeddings(
-        # Paths
-        items_path,
-        train_ratings_path,
-        val_ratings_path,
-        text_embeddings_path,
-        embeddings_savepath, 
-        # Learning hyperparameters
-        temperature,
-        batch_size, 
-        lr, 
-        num_epochs, 
-        # Model hyperparameters
-        num_layers,
-        hidden_dim,
-        aggregator_type,
-        skip_connection,
-        bidirectional,
-        num_traversals, 
-        termination_prob, 
-        num_random_walks, 
-        num_neighbor,
-        # Misc
-        validate_every_n_epoch,
-        device, 
-        wandb_name, 
-        use_wandb,
-):
+def prepare_gnn_embeddings(config):
     ### Prepare graph
-    bipartite_graph, _ = prepare_graphs(items_path, train_ratings_path)
-    bipartite_graph = bipartite_graph.to(device)
+    bipartite_graph, _ = prepare_graphs(config["items_path"], config["train_ratings_path"])
+    bipartite_graph = bipartite_graph.to(config["device"])
 
     ### Init wandb
-    if use_wandb:
-        wandb.init(project="graph-rec-gnn", name=wandb_name)
+    if config["use_wandb"]:
+        wandb.init(project="graph-rec-gnn", name=config["wandb_name"], config=config)
 
     ### Prepare model
-    text_embeddings = torch.tensor(np.load(text_embeddings_path)).to(device)
+    text_embeddings = torch.tensor(np.load(config["text_embeddings_path"])).to(config["device"])
     model = GNNModel(
         bipartite_graph=bipartite_graph, 
         text_embeddings=text_embeddings, 
-        num_layers=num_layers,
-        hidden_dim=hidden_dim,
-        aggregator_type=aggregator_type,
-        skip_connection=skip_connection,
-        bidirectional=bidirectional,
-        num_traversals=num_traversals, 
-        termination_prob=termination_prob, 
-        num_random_walks=num_random_walks, 
-        num_neighbor=num_neighbor
+        num_layers=config["num_layers"],
+        hidden_dim=config["hidden_dim"],
+        aggregator_type=config["aggregator_type"],
+        skip_connection=config["skip_connection"],
+        bidirectional=config["bidirectional"],
+        num_traversals=config["num_traversals"], 
+        termination_prob=config["termination_prob"], 
+        num_random_walks=config["num_random_walks"], 
+        num_neighbor=config["num_neighbor"]
     )
-    model = model.to(device)
+    model = model.to(config["device"])
 
     ### Prepare dataloader
-    all_users = torch.arange(bipartite_graph.num_nodes("User")).to(device)
+    all_users = torch.arange(bipartite_graph.num_nodes("User")).to(config["device"])
     all_users = all_users[bipartite_graph.in_degrees(all_users, etype="ItemUser") > 1] # We need to sample 2 items per user
     dataloader = torch.utils.data.DataLoader(
-        all_users, batch_size=batch_size, shuffle=True, drop_last=True)
+        all_users, batch_size=config["batch_size"], shuffle=True, drop_last=True)
 
     ### Prepare optimizer & LR scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     
     ### Train loop
-    for epoch in range(num_epochs):
+    for epoch in range(config["num_epochs"]):
         ### Train
         model.train()
         for user_batch in tqdm(dataloader):
@@ -91,35 +64,35 @@ def prepare_gnn_embeddings(
             item_batch = item_batch.reshape(-1)  # (2 * |user_batch|)
             features = model(item_batch)  # (2 * |user_batch|, hidden_dim)
             sim = features @ features.T  # (2 * |user_batch|, 2 * |user_batch|)
-            loss = nt_xent_loss(sim, temperature)
-            if use_wandb:
+            loss = nt_xent_loss(sim, config["temperature"])
+            if config["use_wandb"]:
                 wandb.log({"loss": loss.item()})
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             lr_scheduler.step()
         ### Validation
-        if (validate_every_n_epoch is not None) and (((epoch + 1) % validate_every_n_epoch) == 0):
+        if (config["validate_every_n_epoch"] is not None) and (((epoch + 1) % config["validate_every_n_epoch"]) == 0):
             item_embeddings = inference_model(
-                model, bipartite_graph, batch_size, hidden_dim, device)
+                model, bipartite_graph, config["batch_size"], config["hidden_dim"], config["device"])
             with tempfile.TemporaryDirectory() as tmp_dir_name:
                 tmp_embeddings_path = os.path.join(tmp_dir_name, "embeddings.npy")
                 np.save(tmp_embeddings_path, item_embeddings)
-                prepare_recsys(items_path, tmp_embeddings_path, tmp_dir_name)
+                prepare_recsys(config["items_path"], tmp_embeddings_path, tmp_dir_name)
                 metrics = evaluate_recsys(
-                    val_ratings_path, 
+                    config["val_ratings_path"], 
                     os.path.join(tmp_dir_name, "index.faiss"),
                     os.path.join(tmp_dir_name, "items.db"))
-                print(f"Epoch {epoch + 1} / {num_epochs}. {metrics}")
-                if use_wandb:
+                print(f"Epoch {epoch + 1} / {config['num_epochs']}. {metrics}")
+                if config["use_wandb"]:
                     wandb.log(metrics)
          
-    if use_wandb:
+    if config["use_wandb"]:
         wandb.finish()
     
     ### Process full dataset
-    item_embeddings = inference_model(model, bipartite_graph, batch_size, hidden_dim, device)
-    np.save(embeddings_savepath, item_embeddings)
+    item_embeddings = inference_model(model, bipartite_graph, config["batch_size"], config["hidden_dim"], config["device"])
+    np.save(config["embeddings_savepath"], item_embeddings)
 
 
 if __name__ == "__main__":
@@ -157,4 +130,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    prepare_gnn_embeddings(**vars(args))
+    prepare_gnn_embeddings(vars(args))
