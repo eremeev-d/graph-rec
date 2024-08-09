@@ -1,3 +1,5 @@
+import random
+
 import torch
 import dgl
 import pandas as pd
@@ -5,6 +7,16 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from exp.utils import normalize_embeddings
+
+
+def fix_random(seed):
+    dgl.seed(seed)
+    torch.random.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
 class LRSchedule:

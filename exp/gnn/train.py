@@ -15,11 +15,14 @@ from exp.evaluate import evaluate_recsys
 from exp.gnn.model import GNNModel
 from exp.gnn.loss import nt_xent_loss
 from exp.gnn.utils import (
-    prepare_graphs, LRSchedule, 
+    prepare_graphs, LRSchedule, fix_random,
     sample_item_batch, inference_model)
 
 
 def prepare_gnn_embeddings(config):
+    ### Fix random seed
+    fix_random(config["seed"])
+
     ### Prepare graph
     bipartite_graph, _ = prepare_graphs(config["items_path"], config["train_ratings_path"])
     bipartite_graph = bipartite_graph.to(config["device"])
@@ -127,6 +130,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_neighbor", type=int, default=10, help="Number of neighbors in PinSAGE-like sampler")
 
     # Misc
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--validate_every_n_epoch", type=int, default=4, help="Perform RecSys validation every n train epochs.")
     parser.add_argument("--device", type=str, default="cpu", help="Device to run the model on (cpu or cuda)")
     parser.add_argument("--wandb_name", type=str, help="WandB run name")
